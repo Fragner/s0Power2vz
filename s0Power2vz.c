@@ -1,3 +1,5 @@
+#ifndef S0POWER2VZ_C
+#define S0POWER2VZ_C
 /**************************************************************************
 S0/Impulse to Volkszaehler 'RaspberryPI deamon'.
 converts the S0 impulse to powervalues
@@ -9,9 +11,6 @@ changed by Martin Fragner <frama1038@gmail.com>
 this is a fork from https://github.com/w3llschmid/s0vz.git
 
 **************************************************************************/
-#define DAEMON_NAME "s0Power2vz"
-#define DAEMON_VERSION "1.0.1-wiringPi"
-#define DAEMON_BUILD "4"
 
 /**************************************************************************
 
@@ -46,29 +45,27 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <poll.h>			          /* wait for events on file descriptors */
 
 #include <sys/ioctl.h>		/* */
-
 #include <stdbool.h>
-
 #include <wiringPi.h>
-
-#define BUF_LEN 64
-
-// What GPIO input are we using?, See http://wiringpi.com/pins/
-//	This is a wiringPi pin number
-
-#define	BUTTON_PIN	8 
+//
+#include "constants.h"
+#include "s0Power2vz.h"
+#include "myConfig.h"
 
 void daemonShutdown();
 void signal_handler(int sig);
+
 void daemonize(char *rundir, char *pidfile);
 void writeCurlFailure2Log(const char *command );
 void readCurlFailure2Log();
 bool failure2LogExits();
 char *getMyLine(FILE *f);
 
-int pidFilehandle, vzport, i, len, running_handles, rc;
+int i, len, running_handles, rc;
+int m_updateTime = 60; //time setted by config-file
+int m_debug = 1; //debug level setted by config-file
+int vzport = 0;
 
-const char *vzserver, *vzpath, *vzuuid[64];
 
 //char gpio_pin_id[] = { 17, 18, 27, 22, 23, 24 }, url[128];
 char gpio_pin_id[] = {2 }, url[256];
@@ -88,8 +85,7 @@ static char errorBuffer[CURL_ERROR_SIZE+1];
  * framas changes
 */
 time_t m_tStart, m_tEnd;
-int m_updateTime = 60; //time setted by config-file
-int m_debug = 1; //debug level setted by config-file
+
 static int cEMPTY = 99999999;
 struct timeval m_tv2;
 unsigned long long m_ullTStart;
@@ -100,7 +96,7 @@ void update_curl_handle_value(const char *vzuuid, int iRun, int iVal);
 bool checkTime(void);
 int calcPower( int iImpCount);
 unsigned long long unixtime_sec(void);
-const int CMAXINPUTS = 5; //5 inputs supportet
+
 int m_once = 1;
 bool bCurlFailure = false;
 /***********************************************+*/
@@ -140,178 +136,10 @@ void myPoll (void){
 	}
 }
 
-/**/
-void signal_handler(int sig) {
-	switch(sig)
-	{
-		case SIGHUP:
-		syslog(LOG_WARNING, "Received SIGHUP signal.");
-		break;
-		case SIGINT:
-		case SIGTERM:
-		syslog(LOG_INFO, "Daemon exiting");
-		daemonShutdown();
-		exit(EXIT_SUCCESS);
-		break;
-		default:
-		syslog(LOG_WARNING, "Unhandled signal %s", strsignal(sig));
-		break;
-	}
-}
-
-void daemonShutdown() {
-	close(pidFilehandle);
-	char pid_file[22];
-	sprintf ( pid_file, "/tmp/%s.pid", DAEMON_NAME );
-	remove(pid_file);
-}
-
-void daemonize(char *rundir, char *pidfile) {
-	int pid, sid, i;
-	char str[10];
-	struct sigaction newSigAction;
-	sigset_t newSigSet;
-
-	if (getppid() == 1)
-	{
-		return;
-	}
-
-	sigemptyset(&newSigSet);
-	sigaddset(&newSigSet, SIGCHLD);
-	sigaddset(&newSigSet, SIGTSTP);
-	sigaddset(&newSigSet, SIGTTOU);
-	sigaddset(&newSigSet, SIGTTIN);
-	sigprocmask(SIG_BLOCK, &newSigSet, NULL);
-
-	newSigAction.sa_handler = signal_handler;
-	sigemptyset(&newSigAction.sa_mask);
-	newSigAction.sa_flags = 0;
-
-	sigaction(SIGHUP, &newSigAction, NULL);
-	sigaction(SIGTERM, &newSigAction, NULL);
-	sigaction(SIGINT, &newSigAction, NULL);
-
-	pid = fork();
-	if (pid < 0)
-	{
-		exit(EXIT_FAILURE);
-	}
-	if (pid > 0)
-	{
-		printf("Child process created: %d\n", pid);
-		exit(EXIT_SUCCESS);
-	}
-	umask(027);
-
-	sid = setsid();
-	if (sid < 0)
-	{
-		exit(EXIT_FAILURE);
-	}
-
-	for (i = getdtablesize(); i >= 0; --i)
-	{
-		close(i);
-	}
-
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
-	close(STDERR_FILENO);
-	chdir(rundir);
-	pidFilehandle = open(pidfile, O_RDWR|O_CREAT, 0600);
-
-	if (pidFilehandle == -1 )
-	{
-		syslog(LOG_INFO, "Could not open PID lock file %s, exiting", pidfile);
-		exit(EXIT_FAILURE);
-	}
-
-	if (lockf(pidFilehandle,F_TLOCK,0) == -1)
-	{
-		syslog(LOG_INFO, "Could not lock PID lock file %s, exiting", pidfile);
-		exit(EXIT_FAILURE);
-	}
-	sprintf(str,"%d\n",getpid());
-	write(pidFilehandle, str, strlen(str));
-}
-
-void cfile() {
-	config_t cfg;
-	config_init(&cfg);
-	int chdir(const char *path);
-	chdir ("/etc");
-
-	if(!config_read_file(&cfg, DAEMON_NAME".cfg"))
-	{
-		syslog(LOG_INFO, "Config error > /etc/%s - %s\n", config_error_file(&cfg),config_error_text(&cfg));
-		config_destroy(&cfg);
-		daemonShutdown();
-		exit(EXIT_FAILURE);
-	}
-
-	if (!config_lookup_string(&cfg, "vzserver", &vzserver))
-	{
-		syslog(LOG_INFO, "Missing 'VzServer' setting in configuration file.");
-		config_destroy(&cfg);
-		daemonShutdown();
-		exit(EXIT_FAILURE);
-	}
-	else
-	syslog(LOG_INFO, "VzServer:%s", vzserver);
-
-	if (!config_lookup_int(&cfg, "vzport", &vzport))
-	{
-		syslog(LOG_INFO, "Missing 'VzPort' setting in configuration file.");
-		config_destroy(&cfg);
-		daemonShutdown();
-		exit(EXIT_FAILURE);
-	}
-	else
-    syslog(LOG_INFO, "VzPort:%d", vzport);
-
-	if (!config_lookup_string(&cfg, "vzpath", &vzpath))
-	{
-		syslog(LOG_INFO, "Missing 'VzPath' setting in configuration file.");
-		config_destroy(&cfg);
-		daemonShutdown();
-		exit(EXIT_FAILURE);
-	}
-	else
-    syslog(LOG_INFO, "VzPath:%s", vzpath);
-
- 	//frama
-	if (inputs > CMAXINPUTS) {
-		syslog(LOG_INFO, "too many inputs (%i) defined, only %i inputs (GPIOS) supported.", inputs, CMAXINPUTS);
-		inputs = CMAXINPUTS;
-	}      
-	for (i=0; i<inputs; i++)
-	{
-		char gpio[6];
-		sprintf ( gpio, "GPIO%01d", i );
-		if ( config_lookup_string( &cfg, gpio, &vzuuid[i]) == CONFIG_TRUE )
-		syslog ( LOG_INFO, "%s = %s", gpio, vzuuid[i] );
-	}
-
-	//frama
-	if (config_lookup_int(&cfg, "updateTime", &m_updateTime))
-	{
-		syslog(LOG_INFO, "m_updateTime:%d", m_updateTime);
-	}
-    else syslog(LOG_INFO, "m_updateTime:%d not found", m_updateTime);
-
-	if (config_lookup_int(&cfg, "debug", &m_debug))
-	{
-		syslog(LOG_INFO, "m_debug: %d", m_debug);	
-	}
-    else syslog(LOG_INFO, "m_debug: %d not found --> use default value", m_debug);	
-
-}
-
 unsigned long long unixtime() {
 	gettimeofday(&tv,NULL);
 	unsigned long long ms_timestamp = (unsigned long long)(tv.tv_sec) * 1000 + (unsigned long long)(tv.tv_usec) / 1000;
-  return ms_timestamp;
+    return ms_timestamp;
 }
 
 void update_curl_handle(const char *vzuuid, int iVal) {
@@ -378,7 +206,7 @@ int main(void) {
 	setlogmask(LOG_UPTO(LOG_INFO));
 	openlog(DAEMON_NAME, LOG_CONS | LOG_PERROR, LOG_USER);
 	syslog ( LOG_INFO, "S0-Impulse->Power to Volkszaehler RaspberryPI daemon %s.%s", DAEMON_VERSION, DAEMON_BUILD );
-	cfile();
+	cfile(inputs);
 	char pid_file[22];
 	sprintf ( pid_file, "/tmp/%s.pid", DAEMON_NAME );
 	daemonize( "/tmp/", pid_file );
@@ -530,7 +358,6 @@ void readCurlFailure2Log() {
 	}
 	syslog(LOG_INFO,"send missing data via curl");
 	
-	
     do {        
         line = getMyLine(fptr);
         if (line != NULL) {
@@ -600,3 +427,4 @@ char *getMyLine(FILE *f){
     } while (true);
     return word;
 }
+#endif
